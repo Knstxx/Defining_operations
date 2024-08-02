@@ -1,62 +1,45 @@
-from datetime import datetime
-from typing import Optional
-import pytz
+from datetime import datetime, timedelta
+import pandas as pd
+import lasio
+
+# Путь к файлу
+file_path = r'/Users/r.r.shcherbatyuk/Downloads/Губкина_осложнения_обновленные_данные/Прихваты по новой иерархии - 30 прихватов (3 - новые, 1 - доп данные)/A) Бурение ротором + проработка - 7 прихватов/7) 449 АГКМ/449 АГКМ [19.04.2022-20.04.2022].las'
+
+# Чтение файла LAS
+las = lasio.read(file_path)
+df = las.df()
+df.index = pd.to_datetime(df.index, unit='ms')
 
 
-class DataClass:
-    def __init__(self,
-                 time: datetime,
-                 bpos: float,
-                 rpma: float,
-                 woba: float,
-                 hkla: float
-                 ):
-        self.time = time  # Время
-        self.bpos = bpos  # Положение блока
-        self.rpma = rpma  # Обороты ротора
-        self.woba = woba  # Нагрузка на долото
-        self.hkla = hkla  # Вес на крюке
-
-    def __repr__(self):
-        return (f"DataClass(time={self.time},",
-                f" bpos={self.bpos},",
-                f" rpma={self.rpma},",
-                f" woba={self.woba},",
-                f" hkla={self.hkla})")
+# Функция для удаления выбросов
+def remove_outliers(dataframe):
+    q1 = dataframe.quantile(0.25)
+    q3 = dataframe.quantile(0.75)
+    iqr = q3 - q1
+    dataframe_cleaned = dataframe[~((dataframe < (q1 - 1.5 * iqr)) |
+                                    (dataframe >
+                                     (q3 + 1.5 * iqr))).any(axis=1)]
+    return dataframe_cleaned
 
 
-def parse_line(line: str) -> Optional[DataClass]:
-    data_list = [float(item) for item in line.split() if item.strip()]
-
-    if len(data_list) == 25:
-        time = datetime.fromtimestamp(data_list[0] / 1000,
-                                      pytz.timezone('Europe/Moscow')
-                                      )
-        return DataClass(time, *data_list[1:5])
-    else:
-        return None
+df_cleaned = remove_outliers(df)
+df_positive = df_cleaned.interpolate()
+print(df_positive.head())
 
 
-def algorithm(file_path: str, time1: str, time2: str) -> str:
-    with open(file_path,
-              'r',
-              encoding='CP1251'
-              ) as file:
-        lines = file.readlines()
+def algorithm(dataframe, time: str) -> str:
+    time2_dt = datetime.fromisoformat(time)
+    time1_dt = time2_dt - timedelta(hours=2)
 
-    data_list = [parse_line(line) for line in lines if parse_line(line)]
-    start_time = datetime.fromisoformat(time1)
-    end_time = datetime.fromisoformat(time2)
-    filtered_list = []
-    for data in data_list:
-        if start_time <= data.time <= end_time:
-            filtered_list.append(data)
+    # Фильтрация DataFrame по времени
+    filtered_df = dataframe[(dataframe.index >= time1_dt) & (dataframe.index
+                                                             <= time2_dt)]
 
-    # Порог для определения (например, 80%)
-    majority_threshold_for_bpos = 0.8
-    majority_threshold_for_rpma = 0.8
-    majority_threshold_for_woba = 0.8
-    majority_threshold_for_hkla = 0.8
+    # Порог для определения
+    majority_threshold_for_bpos = 0.5
+    majority_threshold_for_rpma = 0.5
+    majority_threshold_for_woba = 0.5
+    majority_threshold_for_hkla = 0.5
 
     # Количество значений, удовлетворяющих условию
     bpos_changed_count = 0
@@ -67,41 +50,40 @@ def algorithm(file_path: str, time1: str, time2: str) -> str:
     previous_bpos = None
     previous_hkla = None
 
-    for data in filtered_list:
-        if previous_bpos is not None and data.bpos != previous_bpos:
-            # Значение bpos изменилось
-            bpos_changed_count += 1
-        previous_bpos = data.bpos
+    for idx, row in filtered_df.iterrows():
+        bpos = row['BPOS']
+        rpma = row['RPMA'] if 'RPMA' in row else 0
+        woba = row['WOBA']
+        hkla = row['HKLA']
 
-        if data.rpma > 0:
+        if previous_bpos is not None and bpos != previous_bpos:
+            bpos_changed_count += 1
+        previous_bpos = bpos
+
+        if rpma > 0:
             rpma_greater_than_zero_count += 1
 
-        if data.woba > 0:
+        if woba > 0:
             woba_greater_than_zero_count += 1
 
-        if previous_hkla is not None and data.hkla < previous_hkla:
+        if previous_hkla is not None and hkla < previous_hkla:
             hkla_decreasing_trend_count += 1
-        previous_hkla = data.hkla
+        previous_hkla = hkla
 
-    # Расчет изменений
-    majority_bpos_changed = (bpos_changed_count /
-                             len(filtered_list)
-                             > majority_threshold_for_bpos
-                             )
+    filtered_list_len = len(filtered_df)
+
+    majority_bpos_changed = (bpos_changed_count / filtered_list_len >
+                             majority_threshold_for_bpos)
     majority_rpma_greater_than_zero = (rpma_greater_than_zero_count /
-                                       len(filtered_list)
-                                       > majority_threshold_for_rpma
-                                       )
+                                       filtered_list_len >
+                                       majority_threshold_for_rpma)
     majority_woba_greater_than_zero = (woba_greater_than_zero_count /
-                                       len(filtered_list)
-                                       > majority_threshold_for_woba
-                                       )
+                                       filtered_list_len >
+                                       majority_threshold_for_woba)
     majority_hkla_decreased = (hkla_decreasing_trend_count /
-                               len(filtered_list)
-                               > majority_threshold_for_hkla
-                               )
+                               filtered_list_len >
+                               majority_threshold_for_hkla)
 
-    # Алгоритм
     if majority_bpos_changed:
         result = "1. Положение талевого блока меняется\n"
         if majority_rpma_greater_than_zero:
@@ -136,10 +118,6 @@ def algorithm(file_path: str, time1: str, time2: str) -> str:
     return result
 
 
-if __name__ == "__main__":
-    # Путь к файлу, начальное и конечное время
-    file_path = "file_path.txt"
-    start_time = "2023-01-01T00:00:00"
-    end_time = "2023-01-02T00:00:00"
-
-    print(algorithm(file_path, start_time, end_time))
+timeOfSticking = "2022-04-19 05:06:20"
+operationType = algorithm(df_positive, timeOfSticking)
+print(operationType)
